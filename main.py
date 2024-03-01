@@ -66,8 +66,6 @@ class UserIn(UserBase):
 
 class UserOut(UserBase):
     id: int
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
 
 
 class UserInDatabase(UserOut):
@@ -77,6 +75,10 @@ class UserInDatabase(UserOut):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+
+class TokenData(BaseModel):
+    username: Union[str, None] = None
 
 
 ouath2_scheme = OAuth2PasswordBearer(tokenUrl='login')
@@ -106,6 +108,8 @@ def get_user(username: str) -> UserInDatabase:
 
 
 def get_user_public_data(user: UserInDatabase) -> UserOut:
+    del user['created_at']
+    del user['updated_at']
     del user['password']
     return user
 
@@ -137,8 +141,29 @@ def create_access_token(
     return encoded_jwt
 
 
+def verify_access_token(
+        token: Annotated[str, Depends(ouath2_scheme)]
+) -> UserOut:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate",
+    )
+    try:
+        payload: dict = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get('sub')
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+    user = get_user_public_data(get_user(token_data.username))
+    if user is None:
+        raise credentials_exception
+    return user
+
+
 @app.post("/register")
-async def register(user: UserIn):
+def register(user: UserIn):
     hashed_password: str = get_password_hash(user.password)
     insert_stmt = insert(users_table).values(
         username=user.username,
@@ -170,7 +195,7 @@ async def register(user: UserIn):
 
 
 @app.post("/login")
-async def login(
+def login(
         form_data: Annotated[OAuth2PasswordRequestForm, Depends()]
 ) -> Token:
     user = get_authenticated_user(form_data.username, form_data.password)
@@ -185,3 +210,8 @@ async def login(
         data={"sub": user['username']}, expires_delta=access_token_expires
     )
     return Token(access_token=access_token, token_type="bearer")
+
+
+@app.get("/whoami")
+def whoami(current_user: Annotated[UserOut, Depends(verify_access_token)]) -> UserOut:
+    return current_user
